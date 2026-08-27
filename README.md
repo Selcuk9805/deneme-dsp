@@ -29,8 +29,8 @@ source venv/bin/activate
 # 2. Gereksinimleri yükleyin
 pip install -r requirements.txt
 
-# 3. Sunucuyu başlatın
-uvicorn app.main:app --reload
+# 3. Sunucuyu başlatın (Host ve Port değerlerini kendi ağınıza göre değiştirebilirsiniz)
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 Sunucu başladığında API dokümantasyonunu incelemek ve test etmek için `http://127.0.0.1:8000/docs` adresini ziyaret edebilirsiniz.
 
