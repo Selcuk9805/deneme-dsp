@@ -1,0 +1,23 @@
+# Environments
+venv/
+env/
+.env
+.venv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Temporary/Test Audio Files
+*.wav
+*.mp3
+*.flac
+*.m4a
+
+# IDEs and OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
