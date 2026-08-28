@@ -71,6 +71,11 @@ API yanıtında 3 farklı zaman ekseni (timeline) kullanılır. Oyuncu yazılım
 
 **Örnek Çıktı:**
 
+`confidence` ve `alignment_confidence`, sabit değerler değil — sırasıyla en iyi adayın bir
+sonrakine olan skor farkından ve downbeat (bar) tespitinin ne kadar net olduğundan hesaplanır;
+gerçek isteklerde tipik olarak ~0.5-0.7 aralığında dağılır, aşağıdaki örnek tek bir isteğin
+sonucudur.
+
 ```json
 {
   "status": "success",
@@ -79,7 +84,7 @@ API yanıtında 3 farklı zaman ekseni (timeline) kullanılır. Oyuncu yazılım
     "strategy": "standard_crossfade",
     "selected_candidate_id": "A104_B0",
     "score": 0.72,
-    "confidence": 0.85,
+    "confidence": 0.58,
     "scores": {
       "tempo_compatibility": 0.264,
       "key_compatibility": 0.8,
@@ -96,7 +101,7 @@ API yanıtında 3 farklı zaman ekseni (timeline) kullanılır. Oyuncu yazılım
     "beat_alignment": {
       "track_a_beat_sample": 1260202,
       "track_b_beat_sample": 1536,
-      "alignment_confidence": 0.95
+      "alignment_confidence": 0.53
     }
   },
   "timing": {
