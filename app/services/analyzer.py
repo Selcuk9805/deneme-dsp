@@ -38,6 +38,61 @@ def estimate_downbeat_phase(y: np.ndarray, sr: int, beat_times: np.ndarray) -> t
     confidence = float(np.clip(1 - other_mean / (phase_scores[best_phase] + 1e-9), 0.0, 1.0))
     return best_phase, confidence
 
+
+# How far to search around librosa's DP-tracker beat estimate for the true kick attack. A real
+# user report ("kickler veya basslar bazen geçişlerde birbirine çarpıyor") matches a known class
+# of artifact: the DP tracker optimizes a globally smooth beat path, so its reported time for any
+# *specific* beat can sit tens of milliseconds from the actual transient even when the track's
+# overall tempo is measured accurately — audible as two kicks landing close but not together
+# during a crossfade, not full-on desync. These bounds are structural safety limits (kept well
+# under half a beat so the search can never reach an adjacent beat's own kick), not independently
+# calibrated against a corpus — there's no ground-truth per-sample kick-timing dataset to measure
+# against, unlike every other constant in this file.
+KICK_REFINE_MAX_SEARCH_SECONDS = 0.15
+KICK_REFINE_BEAT_FRACTION = 0.45
+KICK_REFINE_MIN_PROMINENCE = 2.0  # refined peak must clearly stand out from the window's own rise
+# statistics, else the window is a quiet/ambiguous passage — keep the original DP-tracker time
+# rather than snapping to noise.
+
+
+def refine_beat_times_to_kick(y: np.ndarray, sr: int, beat_times: np.ndarray) -> np.ndarray:
+    """Snap each beat time to the true kick attack (steepest rise in low-passed energy) nearby.
+
+    Only affects where a crossfade's exit/entry sample actually lands — tempo (derived from the
+    *unrefined* beat_times, see AudioFeatures.__init__) and downbeat phase (a bulk/aggregate
+    decision across many beats, insensitive to a single beat's small timing nudge) are computed
+    from the DP tracker's original grid first and don't need this precision.
+    """
+    if len(beat_times) == 0:
+        return beat_times
+
+    sos = scipy.signal.butter(4, KICK_BAND_HZ / (sr / 2.0), btype="lowpass", output="sos")
+    y_low = scipy.signal.sosfilt(sos, y)
+
+    seconds_per_beat = float(np.median(np.diff(beat_times))) if len(beat_times) >= 2 else 0.5
+    search_seconds = min(KICK_REFINE_MAX_SEARCH_SECONDS, KICK_REFINE_BEAT_FRACTION * seconds_per_beat)
+
+    refined = np.array(beat_times, dtype=float)
+    for i, t in enumerate(beat_times):
+        lo = max(0, int((t - search_seconds) * sr))
+        hi = min(len(y_low), int((t + search_seconds) * sr))
+        if hi - lo < 128:
+            continue
+
+        energy = y_low[lo:hi] ** 2
+        smoothed = np.convolve(energy, np.ones(64) / 64, mode="same")
+        rise = np.diff(smoothed)
+        if len(rise) == 0:
+            continue
+
+        peak_idx = int(np.argmax(rise))
+        prominence = (rise[peak_idx] - rise.mean()) / (rise.std() + 1e-12)
+        if prominence < KICK_REFINE_MIN_PROMINENCE:
+            continue
+
+        refined[i] = (lo + peak_idx) / sr
+    return refined
+
 def get_camelot_key(chroma_vals: np.ndarray) -> tuple[str, float]:
     maj_profile = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
     min_profile = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
@@ -94,6 +149,11 @@ class AudioFeatures:
             self.tempo = float(tempo_val[0]) if isinstance(tempo_val, np.ndarray) else float(tempo_val)
 
         self.downbeat_phase, self.downbeat_confidence = estimate_downbeat_phase(y, sr, self.beat_times)
+
+        # Snap each beat time to its true kick transient now that tempo/downbeat-phase (both
+        # computed from the DP tracker's original grid above) don't need to change — only where
+        # a chosen cut point's exact sample lands does.
+        self.beat_times = refine_beat_times_to_kick(y, sr, self.beat_times)
 
         self.rms = librosa.feature.rms(y=y)[0]
         
