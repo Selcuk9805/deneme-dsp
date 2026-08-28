@@ -120,6 +120,22 @@ def run_pairs_phase(pickle_path: Path, pairs_csv: Path) -> None:
             reasons.append("duration_too_long")
         elif plan.decision.strategy != "beat_cut" and dur_exec <= 0.0:
             reasons.append("duration_non_positive")
+
+        # Room-to-render: the planned fade must actually fit in the audio remaining past the exit
+        # (A) / entry (B) point — the exact class of bug found 2026-08-28 (a bar-based duration
+        # fix made durations long enough that a late-excerpt exit candidate frequently didn't have
+        # that much audio left; 27.5% of beatport pairs were affected before transition.py's
+        # room_a_execution/room_b_execution clamp was added). Kept here as a permanent regression
+        # guard, not just the one-off diagnostic that originally found it.
+        ROOM_TOLERANCE_SECONDS = 0.05
+        start_crossfade_relative = plan.timing.track_a_start_crossfade_source - features_a.global_offset
+        room_a_execution = max(0.0, features_a.duration - start_crossfade_relative) / ratio_a if ratio_a > 0 else float("inf")
+        b_start_relative = plan.timing.track_b_start_source - features_b.global_offset
+        room_b_execution = max(0.0, features_b.duration - b_start_relative) / ratio_b if ratio_b > 0 else float("inf")
+        if dur_exec > room_a_execution + ROOM_TOLERANCE_SECONDS:
+            reasons.append("exceeds_room_a")
+        if dur_exec > room_b_execution + ROOM_TOLERANCE_SECONDS:
+            reasons.append("exceeds_room_b")
         if abs(lufs_a) > LUFS_GAIN_FLAG_DB or abs(lufs_b) > LUFS_GAIN_FLAG_DB:
             reasons.append("lufs_gain_extreme")
         if plan.decision.score != plan.decision.score:  # NaN

@@ -208,11 +208,29 @@ class TransitionService:
             # actually takes to play), not the source-time value: when ratio_a < 1 (track A
             # slowed down), execution time stretches past source time, so clamping source alone
             # could still let the *actual* crossfade exceed MAX_CROSSFADE_SECONDS (measured: one
-            # pop_corpus pair reached 25.7s before this fix). source_duration_a is then re-derived
-            # from the clamped execution value so TimelineService's source/execution relationship
-            # (execution = source / ratio_a) stays exact — player-branched inverts that formula
-            # client-side (see project memory).
+            # pop_corpus pair reached 25.7s before this fix).
             duration_execution = float(np.clip(duration_execution, MIN_CROSSFADE_SECONDS, MAX_CROSSFADE_SECONDS))
+
+            # Room-to-render: a bar-aligned exit/entry candidate can legitimately sit close to its
+            # own loaded excerpt's end (candidates are drawn from A's *last* 32 beats and B's
+            # *first* 16 beats — see FADE_BARS above). With durations now up to 24s (previously
+            # 2-8s, rarely a real constraint), a fade that doesn't fit in the audio actually
+            # remaining past the chosen point tries to play past the excerpt's end. Found via a
+            # real user report: a transition triggered far later than its planned cut point,
+            # "iyice sonlarında geçiyor, mix tamamen bozuluyor" — clamp to whichever side has less
+            # room, in that side's own execution-time terms.
+            room_a_execution = max(0.0, features_a.duration - start_crossfade_relative) / ratio_a if ratio_a > 0 else duration_execution
+            b_start_relative = features_b.beat_times[b_idx] if b_idx < len(features_b.beat_times) else 0.0
+            room_b_execution = max(0.0, features_b.duration - b_start_relative) / ratio_b if ratio_b > 0 else duration_execution
+            # min only, never re-raised back up to MIN_CROSSFADE_SECONDS — if the room itself is
+            # narrower than that stylistic floor, fitting the available audio wins; a technical
+            # floor (not MIN_CROSSFADE_SECONDS) still avoids a literal 0.0 duration, which would
+            # put the "set" and "fadeVolume" automation events at the same execution_time.
+            duration_execution = max(0.1, min(duration_execution, room_a_execution, room_b_execution))
+
+            # source_duration_a re-derived from the (possibly further-clamped) execution value so
+            # TimelineService's source/execution relationship (execution = source / ratio_a) stays
+            # exact — player-branched inverts that formula client-side (see project memory).
             source_duration_a = duration_execution * ratio_a
         
         # Automation & DSP
