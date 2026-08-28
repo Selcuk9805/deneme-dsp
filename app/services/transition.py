@@ -33,6 +33,29 @@ CONFIDENCE_MARGIN_SCALE = 15.0
 CONFIDENCE_FLOOR = 0.3
 CONFIDENCE_CEIL = 0.98
 
+# How many beats forward from a candidate point to average beat_energies over, instead of that
+# single beat's instantaneous reading — a candidate can look energetic at the exact instant and
+# still be one bar away from a breakdown/lull right after it. 4 beats = 1 bar, the smallest real
+# crossfade this project produces (short_crossfade's fade_beats).
+ENERGY_LOOKAHEAD_BEATS = 4
+
+# get_camelot_key's best_corr (returned as AudioFeatures.key_confidence), measured across 148
+# beatport analyses: min=0.21 max=0.91 median=0.52, p10=0.28. Threshold set just above p10 so
+# roughly the bottom ~10% of individually weak detections get neutralized — consistent with the
+# ~12% "fell back to the default '1A' key" rate measured in the pre-confidence baseline (those
+# are exactly the near-zero-correlation cases this threshold is meant to catch).
+KEY_CONFIDENCE_THRESHOLD = 0.3
+
+# estimate_downbeat_phase's raw confidence sits on a much smaller natural scale than the 0.5-1.0
+# range decision.confidence uses (four beat-phases sharing real music's onset energy fairly
+# evenly means even a *correct* phase pick rarely dominates outright) — measured pairwise min
+# (the weakest-link value alignment_confidence actually reports) across 5402 real beatport pairs:
+# median ~0.09, p95 ~0.25, max ~0.57. Rescaled the same way decision.confidence was so the
+# reported value spans a meaningful range instead of clustering near the floor.
+ALIGNMENT_CONFIDENCE_SCALE = 2.5
+ALIGNMENT_CONFIDENCE_FLOOR = 0.3
+ALIGNMENT_CONFIDENCE_CEIL = 0.98
+
 
 def get_key_score(key1: str, key2: str) -> float:
     if key1 == key2: return 1.0
@@ -42,6 +65,16 @@ def get_key_score(key1: str, key2: str) -> float:
         return 0.8
     return 0.2
 
+
+def _forward_energy(energies: np.ndarray, idx: int, beats: int = ENERGY_LOOKAHEAD_BEATS) -> float:
+    """Mean of `energies` over the `beats` beats forward from `idx`, not just `energies[idx]`."""
+    if len(energies) == 0:
+        return 0.0
+    start = min(idx, len(energies) - 1)
+    window = energies[start:min(len(energies), start + beats)]
+    return float(np.mean(window)) if len(window) > 0 else float(energies[start])
+
+
 class TransitionService:
     @staticmethod
     def calculate_transition(features_a: AudioFeatures, features_b: AudioFeatures) -> TransitionPlan:
@@ -50,24 +83,33 @@ class TransitionService:
         tempo_diff = abs(ratio_a - 1.0) + abs(ratio_b - 1.0)
         tempo_comp = max(0.0, 1.0 - tempo_diff * 5)
         
-        # Key Score
-        key_comp = get_key_score(features_a.camelot_key, features_b.camelot_key)
-        
+        # Key Score — neutral (not compatible, not incompatible) when either track's key
+        # detection wasn't confident enough to trust (near-silent/ambiguous chroma content),
+        # instead of treating every detection as equally reliable regardless of how weak the
+        # underlying chroma correlation was.
+        key_reliable = (
+            features_a.key_confidence >= KEY_CONFIDENCE_THRESHOLD
+            and features_b.key_confidence >= KEY_CONFIDENCE_THRESHOLD
+        )
+        key_comp = get_key_score(features_a.camelot_key, features_b.camelot_key) if key_reliable else 0.5
+
         # Candidate Generation
         candidates = []
         beats_a = len(features_a.beat_times)
         beats_b = len(features_b.beat_times)
-        
-        # Generate candidates using last 32 beats of A and first 16 beats of B
+
+        # Generate candidates using last 32 beats of A and first 16 beats of B, aligned to each
+        # track's own real downbeat phase (see analyzer.py's estimate_downbeat_phase) rather than
+        # assuming the excerpt's first loaded beat is always bar 1.
         a_candidates = []
         for i in range(min(32, beats_a)):
             idx = beats_a - 1 - i
-            if idx % 4 == 0:  # Bar boundary
+            if (idx - features_a.downbeat_phase) % 4 == 0:  # real bar boundary
                 a_candidates.append(idx)
-                
+
         b_candidates = []
         for i in range(min(16, beats_b)):
-            if i % 4 == 0:
+            if (i - features_b.downbeat_phase) % 4 == 0:
                 b_candidates.append(i)
                 
         if not a_candidates: a_candidates = [beats_a - 1] if beats_a > 0 else [0]
@@ -81,9 +123,10 @@ class TransitionService:
                 phrase_comp = 1.0 if dist_from_end % 16 == 0 else (0.8 if dist_from_end % 8 == 0 else 0.5)
                 if b_idx == 0: phrase_comp = min(1.0, phrase_comp + 0.1)
                 
-                # Energy compatibility
-                energy_a = features_a.beat_energies[a_idx] if a_idx < len(features_a.beat_energies) else 0.0
-                energy_b = features_b.beat_energies[b_idx] if b_idx < len(features_b.beat_energies) else 0.0
+                # Energy compatibility — averaged forward from the candidate point, not just its
+                # instantaneous reading, so a candidate about to ride into a lull scores lower.
+                energy_a = _forward_energy(features_a.beat_energies, a_idx)
+                energy_b = _forward_energy(features_b.beat_energies, b_idx)
                 energy_comp = max(0.0, 1.0 - abs(energy_a - energy_b) * 2)
                 
                 # Bass compatibility
@@ -202,7 +245,12 @@ class TransitionService:
                 beat_alignment=BeatAlignment(
                     track_a_beat_sample=track_a_beat_sample,
                     track_b_beat_sample=track_b_beat_sample,
-                    alignment_confidence=0.95
+                    # weakest-link: alignment is only as trustworthy as whichever track's
+                    # downbeat phase was harder to pin down. Rescaled — see ALIGNMENT_CONFIDENCE_*.
+                    alignment_confidence=round(float(np.clip(
+                        ALIGNMENT_CONFIDENCE_FLOOR + min(features_a.downbeat_confidence, features_b.downbeat_confidence) * ALIGNMENT_CONFIDENCE_SCALE,
+                        ALIGNMENT_CONFIDENCE_FLOOR, ALIGNMENT_CONFIDENCE_CEIL,
+                    )), 3)
                 )
             ),
             timing=TimingInfo(

@@ -1,8 +1,44 @@
 import librosa
 import numpy as np
 import pyloudnorm as pyln
+import scipy.signal
 
-def get_camelot_key(chroma_vals: np.ndarray) -> str:
+BEATS_PER_BAR = 4
+KICK_BAND_HZ = 160.0
+
+
+def estimate_downbeat_phase(y: np.ndarray, sr: int, beat_times: np.ndarray) -> tuple[int, float]:
+    """Which of the 4 beat phases (0..3) actually carries the kick/onset accent — i.e. bar 1.
+
+    Candidate generation previously assumed the excerpt's own first loaded beat was always phase
+    0 (`idx % 4 == 0`), which has no relationship to the track's actual musical bar structure —
+    it's an artifact of wherever the 60s load window happened to start. Comparing average onset
+    accent strength across the 4 possible phases finds the one that actually carries the kick.
+    """
+    if len(beat_times) < BEATS_PER_BAR * 2:
+        return 0, 0.0
+
+    sos = scipy.signal.butter(4, KICK_BAND_HZ / (sr / 2.0), btype="lowpass", output="sos")
+    y_low = scipy.signal.sosfilt(sos, y)
+
+    onset_low = librosa.onset.onset_strength(y=y_low, sr=sr, aggregate=np.mean)
+    onset_full = librosa.onset.onset_strength(y=y, sr=sr, aggregate=np.median)
+
+    beat_frames_onset = np.clip(librosa.time_to_frames(beat_times, sr=sr), 0, len(onset_low) - 1)
+    low_at_beat = onset_low[beat_frames_onset]
+    full_at_beat = onset_full[np.clip(beat_frames_onset, 0, len(onset_full) - 1)]
+
+    low_norm = low_at_beat / (low_at_beat.max() + 1e-9)
+    full_norm = full_at_beat / (full_at_beat.max() + 1e-9)
+    accents = 0.7 * low_norm + 0.3 * full_norm
+
+    phase_scores = [accents[phase::BEATS_PER_BAR].mean() for phase in range(BEATS_PER_BAR)]
+    best_phase = int(np.argmax(phase_scores))
+    other_mean = float(np.mean([s for i, s in enumerate(phase_scores) if i != best_phase]) + 1e-9)
+    confidence = float(np.clip(1 - other_mean / (phase_scores[best_phase] + 1e-9), 0.0, 1.0))
+    return best_phase, confidence
+
+def get_camelot_key(chroma_vals: np.ndarray) -> tuple[str, float]:
     maj_profile = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
     min_profile = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
     
@@ -32,8 +68,13 @@ def get_camelot_key(chroma_vals: np.ndarray) -> str:
         if corr_min > best_corr:
             best_corr = corr_min
             best_key = camelot_min[i]
-            
-    return best_key
+
+    # best_corr was previously computed and discarded — every key guess was treated as equally
+    # trustworthy regardless of how weak/ambiguous the underlying chroma correlation actually
+    # was (a near-silent or noisy excerpt still confidently "detects" a key, defaulting to "1A"
+    # when nothing correlates at all). Returning it lets callers down-weight low-confidence
+    # matches instead of trusting every detection equally.
+    return best_key, float(best_corr)
 
 class AudioFeatures:
     def __init__(self, y: np.ndarray, sr: int):
@@ -51,7 +92,9 @@ class AudioFeatures:
             self.tempo = 60.0 / float(np.mean(np.diff(self.beat_times)))
         else:
             self.tempo = float(tempo_val[0]) if isinstance(tempo_val, np.ndarray) else float(tempo_val)
-        
+
+        self.downbeat_phase, self.downbeat_confidence = estimate_downbeat_phase(y, sr, self.beat_times)
+
         self.rms = librosa.feature.rms(y=y)[0]
         
         # LUFS Loudness
@@ -64,7 +107,7 @@ class AudioFeatures:
         # Key / Chroma
         chroma = librosa.feature.chroma_stft(y=y, sr=sr)
         chroma_mean = np.mean(chroma, axis=1)
-        self.camelot_key = get_camelot_key(chroma_mean)
+        self.camelot_key, self.key_confidence = get_camelot_key(chroma_mean)
         
         S = np.abs(librosa.stft(y))
         freqs = librosa.fft_frequencies(sr=sr)
