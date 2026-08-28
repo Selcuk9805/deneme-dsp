@@ -46,6 +46,21 @@ ENERGY_LOOKAHEAD_BEATS = 4
 # are exactly the near-zero-correlation cases this threshold is meant to catch).
 KEY_CONFIDENCE_THRESHOLD = 0.3
 
+# Strategy -> crossfade length, in BARS (4 beats each) not raw beats. The original values here
+# (16/8/4/2) were used directly as a beat count, so "harmonic_crossfade" — meant to be the
+# longest, most confident blend — worked out to just 4 bars (~7.7s at 124 BPM), barely longer
+# than a single "standard_crossfade" bar-group and far short of a real DJ's extended blend for an
+# excellent match. Rescaled to real bar counts (a genuine user report from real-device listening:
+# "önceki projelerimize göre mix süresi belirgin şekilde daha kısa" — confirmed against the
+# sibling project's own proven 4-8-bar, up-to-20s-for-an-excellent-match blend lengths).
+# harmonic_crossfade uses 12 (not 16) bars specifically so it stays meaningfully differentiated
+# from phrase_crossfade across most real tempos instead of both simply hitting
+# MAX_CROSSFADE_SECONDS — at 16 bars, anything under ~160 BPM would clamp to the same 24s ceiling.
+BEATS_PER_BAR = 4
+FADE_BARS = {"harmonic_crossfade": 12.0, "phrase_crossfade": 8.0, "standard_crossfade": 4.0, "short_crossfade": 2.0, "beat_cut": 0.0}
+MIN_CROSSFADE_SECONDS = 2.0
+MAX_CROSSFADE_SECONDS = 24.0
+
 # estimate_downbeat_phase's raw confidence sits on a much smaller natural scale than the 0.5-1.0
 # range decision.confidence uses (four beat-phases sharing real music's onset energy fairly
 # evenly means even a *correct* phase pick rarely dominates outright) — measured pairwise min
@@ -164,19 +179,15 @@ class TransitionService:
         score = best["score"]
         if score > 0.85 and key_comp >= 0.8:
             strategy = "harmonic_crossfade"
-            fade_beats = 16.0
         elif score > 0.75:
             strategy = "phrase_crossfade"
-            fade_beats = 8.0
         elif score > 0.55:
             strategy = "standard_crossfade"
-            fade_beats = 4.0
         elif score > 0.4:
             strategy = "short_crossfade"
-            fade_beats = 2.0
         else:
             strategy = "beat_cut"
-            fade_beats = 0.0
+        fade_beats = FADE_BARS[strategy] * BEATS_PER_BAR
             
         a_idx = best["a_idx"]
         b_idx = best["b_idx"]
@@ -192,6 +203,17 @@ class TransitionService:
         
         source_duration_a = (fade_beats / features_a.tempo) * 60.0 if features_a.tempo > 0 else 0.0
         duration_execution = source_duration_a / ratio_a
+        if fade_beats > 0:
+            # Clamp the real-world listening duration (execution time — what the crossfade
+            # actually takes to play), not the source-time value: when ratio_a < 1 (track A
+            # slowed down), execution time stretches past source time, so clamping source alone
+            # could still let the *actual* crossfade exceed MAX_CROSSFADE_SECONDS (measured: one
+            # pop_corpus pair reached 25.7s before this fix). source_duration_a is then re-derived
+            # from the clamped execution value so TimelineService's source/execution relationship
+            # (execution = source / ratio_a) stays exact — player-branched inverts that formula
+            # client-side (see project memory).
+            duration_execution = float(np.clip(duration_execution, MIN_CROSSFADE_SECONDS, MAX_CROSSFADE_SECONDS))
+            source_duration_a = duration_execution * ratio_a
         
         # Automation & DSP
         lufs_gain_a = -14.0 - features_a.lufs

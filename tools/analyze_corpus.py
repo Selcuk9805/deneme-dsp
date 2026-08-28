@@ -48,7 +48,8 @@ WORKERS = 8
 # the resulting speed ratios to roughly [0.87, 1.15] — anything further out signals a bug
 # (e.g. a near-zero detected tempo), not a legitimate sync decision.
 RATIO_FLAG_THRESHOLD = 0.20
-DURATION_FLAG_SECONDS = 20.0
+DURATION_FLAG_SECONDS = 30.0  # above transition.py's own MAX_CROSSFADE_SECONDS=24.0 clamp — flag
+# only values that clamp isn't supposed to allow at all (a bug), not the legitimate 24s ceiling
 LUFS_GAIN_FLAG_DB = 20.0
 
 
