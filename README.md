@@ -12,6 +12,7 @@ Bu backend asla sesi *işleyip (render edip)* geri döndürmez. Sadece ses dosya
 - **Camelot Wheel Harmonik Uyum:** Şarkıların notalarını (örneğin C Minor / 5A) algılar. Eğer iki parça müzikal olarak uyumluysa (aynı nota veya komşu) uzun bir harmonik geçiş yapar; uyumsuzsa çamurlaşmayı önlemek için hızlı bir geçiş (dissonant fast cut) stratejisi belirler.
 - **Dinamik EQ (Biquad Filter) Otomasyonu:** "At nalı" etkisini (phasing) ve bas frekanslarındaki çamurlaşmayı (muddy bass) engellemek için, iki parçanın bass enerjisini analiz eder. Çakışma durumunda dinamik bir High-Pass filtre frekansı hesaplar ve fade otomasyonu önerir.
 - **Zaman Bükülmesi (Time-Warping) Çözünürlüğü:** BPM eşitlemesi amacıyla değişen oynatma hızlarının (speed ratio) otomasyon sürelerine olan etkisini hesaplayarak mutlak `execution_time` değerleri döner. Oynatıcı tarafında sürüklenme (drift) yaşanmaz.
+- **Akıllı Önbellekleme (Caching & SQLite):** Ağır ses analizlerini her seferinde tekrarlamamak için indirilen dosyaları MD5 ile hash'leyip önbelleğe alır. Üretilen geçiş planlarını yerleşik SQLite veritabanına kaydeder; aynı iki şarkı istendiğinde milisaniyeler içinde eski JSON planını döner.
 
 ---
 
@@ -40,7 +41,7 @@ Sunucu başladığında API dokümantasyonunu incelemek ve test etmek için `htt
 
 Oynatıcınız (örneğin Flutter uygulaması), çalan şarkı (Track A) bitmeye yaklaştığında (örneğin bitimine 30 saniye kala) arka planda bu API'yi çağırarak bir geçiş planı talep etmelidir.
 
-### İstek (Request)
+### Geçiş Planı İsteme (POST)
 
 **Endpoint:** `POST /api/transition/plan`
 
@@ -49,6 +50,16 @@ Oynatıcınız (örneğin Flutter uygulaması), çalan şarkı (Track A) bitmeye
   "track_a": "https://www.youtube.com/watch?v=...", // Şu an çalan parça (URL veya Lokal dosya yolu)
   "track_b": "/storage/emulated/0/Music/siradaki_sarki.mp3" // Sıradaki parça
 }
+```
+
+### Önbelleği (Cache) Temizleme (POST)
+
+**Endpoint:** `POST /api/cache/clear`
+
+Zamanla diskte birikecek olan hash'lenmiş ses dosyalarını (`cache/audio/`) ve SQLite veritabanı analiz geçmişini (`cache/plans.db`) sıfırlar. 
+
+```bash
+curl -X POST http://localhost:8000/api/cache/clear
 ```
 
 ### Yanıt (Response) ve Zamanlama Koordinatları
