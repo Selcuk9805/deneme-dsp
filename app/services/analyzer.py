@@ -41,8 +41,16 @@ class AudioFeatures:
         self.duration = librosa.get_duration(y=y, sr=sr)
         
         tempo_val, self.beat_frames = librosa.beat.beat_track(y=y, sr=sr)
-        self.tempo = float(tempo_val[0]) if isinstance(tempo_val, np.ndarray) else float(tempo_val)
         self.beat_times = librosa.frames_to_time(self.beat_frames, sr=sr)
+
+        # librosa's own `tempo` return value comes from its tempogram autocorrelation, which at
+        # the default hop_length is quantized too coarsely (many distinct true BPMs collapse to
+        # the same reported value). Deriving BPM from the mean spacing of the already-computed
+        # beat_times sidesteps that quantization at no extra cost.
+        if len(self.beat_times) >= 2:
+            self.tempo = 60.0 / float(np.mean(np.diff(self.beat_times)))
+        else:
+            self.tempo = float(tempo_val[0]) if isinstance(tempo_val, np.ndarray) else float(tempo_val)
         
         self.rms = librosa.feature.rms(y=y)[0]
         
@@ -61,26 +69,37 @@ class AudioFeatures:
         S = np.abs(librosa.stft(y))
         freqs = librosa.fft_frequencies(sr=sr)
         bass_bins = np.where((freqs >= 20) & (freqs <= 250))[0]
+        total_energy = np.mean(S, axis=0)
         if len(bass_bins) > 0:
             self.bass_energy = np.mean(S[bass_bins, :], axis=0)
         else:
             self.bass_energy = np.zeros(S.shape[1])
 
+        # Bass energy as a fraction of that frame's total spectral energy, not a raw STFT
+        # magnitude. Raw magnitude scales with the track's mastering loudness, so a fixed
+        # threshold on it either fires for nearly every track or almost none depending on the
+        # corpus (measured: >90% of real pairs landed on the same tier — see
+        # docs/decisions.md-equivalent finding in project memory). The ratio is scale-invariant.
+        self.bass_energy_ratio = np.divide(
+            self.bass_energy, total_energy,
+            out=np.zeros_like(self.bass_energy), where=total_energy > 1e-8,
+        )
+
         # Compute RMS and Bass energy per beat
         self.beat_energies = np.zeros(len(self.beat_frames))
         self.beat_bass_energies = np.zeros(len(self.beat_frames))
-        
+
         rms_frames = librosa.feature.rms(y=y)[0]
-        
+
         for i, b_frame in enumerate(self.beat_frames):
             # Window of roughly 1 beat around the frame
             start = max(0, b_frame - 10)
             end = min(len(rms_frames), b_frame + 10)
             self.beat_energies[i] = np.mean(rms_frames[start:end])
-            
-            # Bass energy window
+
+            # Bass energy window (normalized ratio, not raw magnitude)
             if len(bass_bins) > 0:
-                self.beat_bass_energies[i] = np.mean(S[bass_bins, start:end])
+                self.beat_bass_energies[i] = np.mean(self.bass_energy_ratio[start:end])
         
         self.global_offset = 0.0
 

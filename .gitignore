@@ -24,3 +24,6 @@ __pycache__/
 
 # Application Data
 cache/
+
+# Benchmark tooling output (reproducible via tools/*.py, not source)
+tools/datasets/

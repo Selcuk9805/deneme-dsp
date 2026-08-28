@@ -7,6 +7,33 @@ from app.models.schemas import (
 )
 import numpy as np
 
+# beat_bass_energies is a scale-invariant ratio (bass-band STFT magnitude / total spectral
+# magnitude for that frame), not raw magnitude — see analyzer.py. Thresholds calibrated from the
+# combined distribution (~47k beat samples) across BOTH the progressive-house (beatport) and
+# Turkish-pop (pop_corpus) corpora (tools/analyze_corpus.py) — not just one genre, since bass
+# prominence differs systematically by genre (EDM medians ~15.5, pop medians ~10.4) and a
+# single-genre calibration didn't transfer: tuning on beatport alone left pop_corpus with almost
+# no "both loud" pairs (13/20306). ~p65/~p25 of the combined distribution. Chosen so "both loud" /
+# "both quiet" each cover a meaningful, non-degenerate share of real pairs in both corpora instead
+# of one tier absorbing ~94% of them (the old raw-magnitude thresholds 0.1/0.05 did, since raw
+# STFT magnitude scales with a track's mastering loudness rather than actual bass prominence).
+LOUD_BASS_THRESHOLD = 12.5
+QUIET_BASS_THRESHOLD = 7.5
+
+# Candidate-score margin -> confidence. A tie with the runner-up candidate (margin=0) means the
+# choice was genuinely ambiguous (confidence 0.5); a decisive lead saturates toward the ceiling.
+# Floor/ceiling keep this from ever claiming total certainty or total doubt about a decision that
+# was still made deterministically. Scale calibrated from the real margin distribution measured
+# across the beatport corpus (tools/analyze_corpus.py): median margin is ~0.001 (candidates on
+# the bar-boundary grid are frequently near-identical — a genuine tie, not a measurement gap),
+# p95 ~0.027. Scale=15 maps that p95 to confidence ~0.9, so confidence actually spans a
+# meaningful range instead of clustering just above the floor for nearly every pair (an earlier
+# scale=5 did — max observed confidence was 0.675 across a sample where the ceiling is 0.98).
+CONFIDENCE_MARGIN_SCALE = 15.0
+CONFIDENCE_FLOOR = 0.3
+CONFIDENCE_CEIL = 0.98
+
+
 def get_key_score(key1: str, key2: str) -> float:
     if key1 == key2: return 1.0
     if key1[:-1] == key2[:-1]: return 0.9
@@ -63,9 +90,9 @@ class TransitionService:
                 bass_a = features_a.beat_bass_energies[a_idx] if a_idx < len(features_a.beat_bass_energies) else 0.0
                 bass_b = features_b.beat_bass_energies[b_idx] if b_idx < len(features_b.beat_bass_energies) else 0.0
                 bass_comp = 1.0
-                if bass_a > 0.1 and bass_b > 0.1:
+                if bass_a > LOUD_BASS_THRESHOLD and bass_b > LOUD_BASS_THRESHOLD:
                     bass_comp = 0.3
-                elif bass_a < 0.05 and bass_b < 0.05:
+                elif bass_a < QUIET_BASS_THRESHOLD and bass_b < QUIET_BASS_THRESHOLD:
                     bass_comp = 0.5
                 
                 total = (tempo_comp * 0.15) + (key_comp * 0.25) + (phrase_comp * 0.3) + (energy_comp * 0.15) + (bass_comp * 0.15)
@@ -85,7 +112,11 @@ class TransitionService:
         # Select best candidate
         candidates.sort(key=lambda x: x["score"], reverse=True)
         best = candidates[0]
-        
+
+        # Confidence from how decisively the best candidate beat the runner-up, not a constant.
+        margin = (best["score"] - candidates[1]["score"]) if len(candidates) >= 2 else 1.0
+        confidence = float(np.clip(0.5 + margin * CONFIDENCE_MARGIN_SCALE, CONFIDENCE_FLOOR, CONFIDENCE_CEIL))
+
         # Strategy Decision
         score = best["score"]
         if score > 0.85 and key_comp >= 0.8:
@@ -160,7 +191,7 @@ class TransitionService:
                 strategy=strategy,
                 selected_candidate_id=best["id"],
                 score=best["score"],
-                confidence=0.85, # static for now unless ML model adds true variance
+                confidence=round(confidence, 3),
                 scores=best["scores"],
                 candidates=c_list
             ),
